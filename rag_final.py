@@ -1,12 +1,13 @@
 
 """
-RAG Chat with PDFs & Web Search
-Updated Version - LangChain 0.2+
+AI Search Chatbot - RAG with PDFs & Web Search
+LangChain 0.2+ compatible
 """
 
-import streamlit as st
 import os
 import tempfile
+import streamlit as st
+
 from dotenv import load_dotenv
 
 # LangChain imports
@@ -15,21 +16,24 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import PyPDFLoader
+
 from langchain_community.tools import (
     DuckDuckGoSearchRun,
     ArxivQueryRun,
     WikipediaQueryRun
 )
+
 from langchain_community.utilities import (
     ArxivAPIWrapper,
     WikipediaAPIWrapper
 )
+
 from langchain_core.messages import HumanMessage, SystemMessage
 
-# Load environment variables
-load_dotenv()
 
-# ==================== PAGE CONFIGURATION ====================
+# =====================================================
+# 1. PAGE CONFIGURATION
+# =====================================================
 
 st.set_page_config(
     page_title="AI Search Chatbot",
@@ -40,16 +44,34 @@ st.set_page_config(
 st.title("🔍 RAG Chat with PDFs & Tools")
 
 st.markdown(
-    "Ask questions using your PDFs, web search, "
-    "academic papers, and Wikipedia."
+    """
+    Ask questions using your PDFs, web search,
+    academic research papers, and Wikipedia.
+    """
 )
 
-# ==================== API KEY CONFIGURATION ====================
 
-try:
-    api_key = st.secrets["GROQ_API_KEY"]
-except Exception:
-    api_key = os.getenv("GROQ_API_KEY", "")
+# =====================================================
+# 2. API KEY CONFIGURATION
+# =====================================================
+
+load_dotenv()
+
+def get_groq_api_key():
+    """Read Groq API key from Streamlit Secrets or local .env."""
+
+    try:
+        api_key = st.secrets.get("GROQ_API_KEY", "")
+    except Exception:
+        api_key = ""
+
+    if not api_key:
+        api_key = os.getenv("GROQ_API_KEY", "")
+
+    return api_key
+
+
+api_key = get_groq_api_key()
 
 if not api_key:
     st.error(
@@ -58,7 +80,37 @@ if not api_key:
     )
     st.stop()
 
-# ==================== SIDEBAR ====================
+
+# =====================================================
+# 3. INITIALIZE LLM
+# =====================================================
+
+@st.cache_resource
+def initialize_llm(key):
+    return ChatGroq(
+        groq_api_key=key,
+        model="openai/gpt-oss-20b",
+        temperature=0.7
+    )
+
+
+llm = initialize_llm(api_key)
+
+
+# =====================================================
+# 4. INITIALIZE EMBEDDINGS
+# =====================================================
+
+@st.cache_resource
+def initialize_embeddings():
+    return HuggingFaceEmbeddings(
+        model_name="all-MiniLM-L6-v2"
+    )
+
+
+# =====================================================
+# 5. SIDEBAR
+# =====================================================
 
 st.sidebar.title("⚙️ Settings")
 
@@ -69,15 +121,25 @@ uploaded_files = st.sidebar.file_uploader(
 )
 
 st.sidebar.markdown("---")
+
 st.sidebar.info(
-    "You can ask questions about uploaded PDFs "
-    "or search the web, academic papers, and Wikipedia."
+    """
+    You can ask questions about:
+
+    - Uploaded PDF documents
+    - Internet search results
+    - Academic research papers
+    - Wikipedia articles
+    """
 )
 
-# ==================== VECTOR STORE ====================
+
+# =====================================================
+# 6. LOAD AND VECTORIZE PDF DOCUMENTS
+# =====================================================
 
 def load_and_vectorize_pdfs(pdf_files):
-    """Load PDF documents and convert them into vectors."""
+    """Load PDFs, split text into chunks and create FAISS vectors."""
 
     try:
         documents = []
@@ -95,15 +157,16 @@ def load_and_vectorize_pdfs(pdf_files):
             try:
                 loader = PyPDFLoader(tmp_path)
                 documents.extend(loader.load())
+
             finally:
                 if os.path.exists(tmp_path):
                     os.unlink(tmp_path)
 
         if not documents:
-            st.warning("No pages found in the uploaded PDFs.")
+            st.warning("No pages found in uploaded PDFs.")
             return None
 
-        # Split documents into smaller chunks
+        # Split documents into chunks
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200
@@ -112,15 +175,13 @@ def load_and_vectorize_pdfs(pdf_files):
         chunks = splitter.split_documents(documents)
 
         if not chunks:
-            st.warning("No readable text found in the PDFs.")
+            st.warning("No readable text found in PDFs.")
             return None
 
         # Generate embeddings
-        embeddings = HuggingFaceEmbeddings(
-            model_name="all-MiniLM-L6-v2"
-        )
+        embeddings = initialize_embeddings()
 
-        # Create FAISS vector store
+        # Create FAISS vector database
         vector_store = FAISS.from_documents(
             chunks,
             embeddings
@@ -129,14 +190,16 @@ def load_and_vectorize_pdfs(pdf_files):
         return vector_store
 
     except Exception as e:
-        st.error(f"Error loading PDFs: {str(e)}")
+        st.error(f"PDF processing error: {str(e)}")
         return None
 
 
-# ==================== PDF SEARCH ====================
+# =====================================================
+# 7. PDF SEARCH
+# =====================================================
 
 def search_pdfs(query, vector_store):
-    """Search uploaded PDFs using similarity search."""
+    """Search PDF documents using similarity search."""
 
     if vector_store is None:
         return ""
@@ -147,73 +210,94 @@ def search_pdfs(query, vector_store):
             k=3
         )
 
-        if not docs:
-            return ""
-
         results = []
 
         for doc in docs:
+            source = doc.metadata.get("source", "Uploaded PDF")
+            page = doc.metadata.get("page", "Unknown")
+
             results.append(
-                f"📄 {doc.page_content[:500]}"
+                f"Source: {source}, Page: {page + 1 if isinstance(page, int) else page}\n"
+                f"{doc.page_content[:700]}"
             )
 
-        return "\n---\n".join(results)
+        return "\n\n---\n\n".join(results)
 
     except Exception as e:
-        st.error(f"PDF search error: {str(e)}")
-        return ""
+        return f"PDF search error: {str(e)}"
 
 
-# ==================== WEB SEARCH ====================
+# =====================================================
+# 8. WEB SEARCH
+# =====================================================
+
+@st.cache_resource
+def initialize_web_search():
+    return DuckDuckGoSearchRun()
+
 
 def search_web(query):
     """Search the internet using DuckDuckGo."""
 
     try:
-        search = DuckDuckGoSearchRun()
-        return search.run(query)[:1000]
+        search = initialize_web_search()
+        return search.run(query)[:1500]
 
     except Exception as e:
         return f"Web search unavailable: {str(e)}"
 
 
-# ==================== ARXIV SEARCH ====================
+# =====================================================
+# 9. ARXIV SEARCH
+# =====================================================
+
+@st.cache_resource
+def initialize_arxiv():
+    return ArxivQueryRun(
+        api_wrapper=ArxivAPIWrapper(
+            top_k_results=2
+        )
+    )
+
 
 def search_arxiv(query):
-    """Search academic research papers using arXiv."""
+    """Search academic research papers."""
 
     try:
-        arxiv = ArxivQueryRun(
-            api_wrapper=ArxivAPIWrapper(
-                top_k_results=2
-            )
-        )
-
-        return arxiv.run(query)[:1000]
+        arxiv = initialize_arxiv()
+        return arxiv.run(query)[:1500]
 
     except Exception as e:
         return f"arXiv search unavailable: {str(e)}"
 
 
-# ==================== WIKIPEDIA SEARCH ====================
+# =====================================================
+# 10. WIKIPEDIA SEARCH
+# =====================================================
+
+@st.cache_resource
+def initialize_wikipedia():
+    return WikipediaQueryRun(
+        api_wrapper=WikipediaAPIWrapper(
+            top_k_results=2
+        )
+    )
+
 
 def search_wikipedia(query):
     """Search Wikipedia."""
 
     try:
-        wiki = WikipediaQueryRun(
-            api_wrapper=WikipediaAPIWrapper(
-                top_k_results=2
-            )
-        )
-
-        return wiki.run(query)[:1000]
+        wiki = initialize_wikipedia()
+        return wiki.run(query)[:1500]
 
     except Exception as e:
         return f"Wikipedia search unavailable: {str(e)}"
 
 
-# ==================== CHAT SESSION ====================
+# =====================================================
+# 11. CHAT SESSION
+# =====================================================
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -225,7 +309,9 @@ if "pdf_signature" not in st.session_state:
     st.session_state.pdf_signature = None
 
 
-# ==================== PDF PROCESSING ====================
+# =====================================================
+# 12. PDF PROCESSING
+# =====================================================
 
 if uploaded_files:
 
@@ -259,7 +345,9 @@ else:
     st.session_state.pdf_signature = None
 
 
-# ==================== DISPLAY CHAT HISTORY ====================
+# =====================================================
+# 13. DISPLAY CHAT HISTORY
+# =====================================================
 
 st.markdown("### 💬 Chat")
 
@@ -269,11 +357,14 @@ for msg in st.session_state.messages:
         st.write(msg["content"])
 
 
-# ==================== USER INPUT ====================
+# =====================================================
+# 14. USER INPUT
+# =====================================================
 
 user_input = st.chat_input(
     "Ask me anything..."
 )
+
 
 if user_input:
 
@@ -292,10 +383,10 @@ if user_input:
 
         try:
 
-            st.write("🔍 Searching information...")
-
-            # Search all sources
-            with st.spinner("Searching PDFs and external sources..."):
+            # Search information sources
+            with st.spinner(
+                "🔍 Searching PDFs and external sources..."
+            ):
 
                 pdf_results = search_pdfs(
                     user_input,
@@ -313,7 +404,7 @@ if user_input:
 
             if pdf_results:
                 context += (
-                    f"From your PDFs:\n"
+                    f"From uploaded PDFs:\n"
                     f"{pdf_results}\n\n"
                 )
 
@@ -335,13 +426,6 @@ if user_input:
                     f"{wiki_results}\n\n"
                 )
 
-            # Initialize Groq LLM
-            llm = ChatGroq(
-                groq_api_key=api_key,
-                model="openai/gpt-oss-20b",
-                temperature=0.7
-            )
-
             # System instructions
             system_msg = SystemMessage(
                 content="""
@@ -351,15 +435,14 @@ if user_input:
                 using the provided context.
 
                 Use relevant information from PDFs,
-                web search, academic papers, and Wikipedia.
+                web search, academic papers and Wikipedia.
 
-                If information comes from search results,
-                mention the relevant source.
+                Mention relevant sources when available.
 
                 If the context does not contain the answer,
                 clearly explain that.
 
-                Be concise, informative, and helpful.
+                Be concise, informative and helpful.
                 """
             )
 
